@@ -110,6 +110,8 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [serverIP, setServerIP] = useState<string>('Loading...');
   const [copiedIP, setCopiedIP] = useState(false);
+  const [checkingLiveIP, setCheckingLiveIP] = useState(false);
+  const [liveIPResult, setLiveIPResult] = useState<{ ip: string; dbStatus: string; dbError: string } | null>(null);
 
   useEffect(() => {
     const saved = getSettings();
@@ -157,6 +159,26 @@ export default function SettingsPage() {
     await navigator.clipboard.writeText(serverIP);
     setCopiedIP(true);
     setTimeout(() => setCopiedIP(false), 2000);
+  };
+
+  const handleCheckLiveIP = async () => {
+    setCheckingLiveIP(true);
+    setLiveIPResult(null);
+    try {
+      const res = await axios.post('/api/debug-ip', { dbConfig: settings.db });
+      setLiveIPResult({
+        ip: res.data.outboundIP,
+        dbStatus: res.data.dbStatus,
+        dbError: res.data.dbError || '',
+      });
+      if (res.data.outboundIP && res.data.outboundIP !== 'unknown') {
+        setServerIP(res.data.outboundIP);
+      }
+    } catch (e) {
+      setLiveIPResult({ ip: 'Error', dbStatus: 'failed', dbError: String(e) });
+    } finally {
+      setCheckingLiveIP(false);
+    }
   };
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -295,6 +317,29 @@ export default function SettingsPage() {
                   Share this IP address with your DBA to whitelist it in your database server's firewall rules.
                   This allows CuraDB AI to connect to your MySQL database securely.
                 </p>
+                <button
+                  onClick={handleCheckLiveIP}
+                  disabled={checkingLiveIP}
+                  className="mt-3 flex items-center gap-1.5 px-3 py-1.5 bg-blue-700 text-white rounded-lg text-xs font-medium hover:bg-blue-800 disabled:opacity-50 transition-colors"
+                >
+                  {checkingLiveIP ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Info className="w-3.5 h-3.5" />}
+                  {checkingLiveIP ? 'Checking live IP...' : 'Check Live Runtime IP'}
+                </button>
+                {liveIPResult && (
+                  <div className={cn(
+                    'mt-2 p-3 rounded-lg text-xs space-y-1',
+                    liveIPResult.dbStatus === 'connected'
+                      ? 'bg-green-50 border border-green-200 text-green-800'
+                      : 'bg-amber-50 border border-amber-200 text-amber-800'
+                  )}>
+                    <p><span className="font-semibold">Live outbound IP:</span> {liveIPResult.ip}</p>
+                    <p><span className="font-semibold">DB Status:</span> {liveIPResult.dbStatus}</p>
+                    {liveIPResult.dbError && <p className="text-red-600"><span className="font-semibold">Error:</span> {liveIPResult.dbError}</p>}
+                    {liveIPResult.dbStatus !== 'connected' && (
+                      <p className="text-amber-700 mt-1">Ask your DBA to whitelist <strong>{liveIPResult.ip}</strong> on port 3306.</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>

@@ -1,5 +1,8 @@
 import { NextResponse } from 'next/server';
 
+// Force dynamic so this runs at request time, not build time
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     // Try multiple IP services
