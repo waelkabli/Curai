@@ -1,58 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { executeQuery } from '@/lib/db';
+import { getCached, setCached, makeCacheKey } from '@/lib/cache';
 import { DBConfig, FilterState } from '@/types';
 
-const BASE_QUERY = `
-SELECT
-  orderitems.id,
-  orderitems.Created,
-  (
-    CASE
-      WHEN promotions.code = 'anood' THEN 122.83
-      WHEN insurance_eligiblity_requests.InsuranceProviderId IS NOT NULL THEN (orders.TotalOriginalPrice * 1.15)
-      WHEN promotions.code IS NOT NULL AND orderitems.ProductId = 147 AND orders.Refunded = FALSE THEN 34.5
-      ELSE orderitems.FinalPrice
-    END
-  ) AS FinalPrice,
-  (CASE
-    WHEN followups.Id > 0 THEN 'Followups'
-    WHEN subscriptions.Id > 0 THEN 'Subscriptions'
-    WHEN bundles.BundleCategoryId = 9 THEN 'HomeLabs'
-    WHEN bundles.Id > 0 THEN 'Bundles'
-    WHEN wellness_programs.Id > 0 THEN 'Wellness'
-    WHEN insurance_eligiblity_requests.InsuranceProviderId = 1 AND orderitems.ProductId != 151 THEN 'MedGulf'
-    WHEN insurance_eligiblity_requests.InsuranceProviderId = 2 AND orderitems.ProductId != 152 THEN 'Bupa'
-    WHEN insurance_eligiblity_requests.InsuranceProviderId = 3 AND orderitems.ProductId != 175 THEN 'Malath'
-    WHEN insurance_eligiblity_requests.InsuranceProviderId = 5 AND orderitems.ProductId != 174 THEN 'SAICO'
-    WHEN orderitems.ProductId = 149 THEN 'Pre-paid Instant'
-    WHEN orderitems.ProductId = 147 THEN 'Dawaa Pre-paid Instant'
-    WHEN orderitems.ProductId = 151 THEN 'MedGulf Instant'
-    WHEN orderitems.ProductId = 152 THEN 'Bupa Instant'
-    WHEN orderitems.ProductId = 174 THEN 'SAICO Instant'
-    WHEN orderitems.ProductId = 175 THEN 'Malath Instant'
-    WHEN consultations.Id > 0 THEN 'Consults'
-  END) AS RevenueSource,
-  (CASE
-    WHEN followups.Id > 0 THEN 'Followups'
-    WHEN subscriptions.Id > 0 THEN 'Subscriptions'
-    WHEN bundles.Id > 0 AND bundles.BundleCategoryId = 9 THEN 'HomeLabs'
-    WHEN bundles.Id > 0 AND bundles.BundleCategoryId != 9 THEN 'Bundles'
-    WHEN wellness_programs.Id > 0 THEN 'Wellness'
-    WHEN orderitems.ProductId = 147 THEN 'DawaaUrgentCare'
-    WHEN orderitems.ProductId = 149 THEN 'UrgentCare'
-    WHEN consultations.Id > 0 AND medicalcategories.Id = 15 AND orderitems.ProductId NOT IN (144,145,150,173) THEN 'MentalCare'
-    WHEN consultations.Id > 0 AND medicalcategories.Id != 15 AND orderitems.ProductId NOT IN (144,145,150,173) THEN 'SpecialityCare'
-    WHEN consultations.Id > 0 AND medicalcategories.Id = 15 AND orderitems.ProductId IN (144,145,150,173) THEN 'InsuranceMentalCare'
-    WHEN consultations.Id > 0 AND medicalcategories.Id != 15 AND orderitems.ProductId IN (144,145,150,173) THEN 'InsuranceSpecialityCare'
-    WHEN orderitems.ProductId IN (151,152,174,175) THEN 'InsuranceInstant'
-  END) AS BusinessLine,
-  orders.UserAuthId AS CustomerUserauthid,
-  orders.CustomerOrganizationId,
-  organizations.Name_en AS organizations_Name_en,
-  orders.CurrencyId,
-  currencies.Code_en AS currencies_Code_en,
-  orderitems.ProductId AS orderitems_ProductId,
-  0 AS DispenseAmount
+export type ChartGranularity = 'daily' | 'monthly' | 'quarterly' | 'yearly';
+
+// ─── Shared SQL fragments ────────────────────────────────────────────────────
+
+const JOINS = `
 FROM orderitems
 INNER JOIN orders ON orders.Id = orderitems.OrderId
 LEFT JOIN promotions ON orders.PromoId = promotions.id
@@ -65,169 +20,259 @@ LEFT JOIN consultations ON consultations.OrderItemId = orderitems.id
 LEFT JOIN doctors ON consultations.SubscriberDocId = doctors.DocId
 LEFT JOIN categories_specialties ON doctors.PrimarySpecialtyId = categories_specialties.SpecialtyId
 LEFT JOIN medicalcategories ON categories_specialties.CategoryId = medicalcategories.Id
-LEFT JOIN specialties ON doctors.PrimarySpecialtyId = specialties.Id
 LEFT JOIN organizations ON orders.CustomerOrganizationId = organizations.Id
 LEFT JOIN currencies ON currencies.id = orders.CurrencyId
-LEFT JOIN products ON products.id = orderitems.ProductId
-GROUP BY orderitems.id
-ORDER BY orderitems.Created DESC
 `;
 
-function buildFilteredQuery(filters: FilterState): { query: string; params: unknown[] } {
-  let whereClause = '';
-  const params: unknown[] = [];
+const FINAL_PRICE = `(
+  CASE
+    WHEN promotions.code = 'anood' THEN 122.83
+    WHEN insurance_eligiblity_requests.InsuranceProviderId IS NOT NULL THEN (orders.TotalOriginalPrice * 1.15)
+    WHEN promotions.code IS NOT NULL AND orderitems.ProductId = 147 AND orders.Refunded = FALSE THEN 34.5
+    ELSE orderitems.FinalPrice
+  END
+)`;
+
+const BUSINESS_LINE = `(CASE
+  WHEN followups.Id > 0 THEN 'Followups'
+  WHEN subscriptions.Id > 0 THEN 'Subscriptions'
+  WHEN bundles.Id > 0 AND bundles.BundleCategoryId = 9 THEN 'HomeLabs'
+  WHEN bundles.Id > 0 AND bundles.BundleCategoryId != 9 THEN 'Bundles'
+  WHEN wellness_programs.Id > 0 THEN 'Wellness'
+  WHEN orderitems.ProductId = 147 THEN 'DawaaUrgentCare'
+  WHEN orderitems.ProductId = 149 THEN 'UrgentCare'
+  WHEN consultations.Id > 0 AND medicalcategories.Id = 15 AND orderitems.ProductId NOT IN (144,145,150,173) THEN 'MentalCare'
+  WHEN consultations.Id > 0 AND medicalcategories.Id != 15 AND orderitems.ProductId NOT IN (144,145,150,173) THEN 'SpecialityCare'
+  WHEN consultations.Id > 0 AND medicalcategories.Id = 15 AND orderitems.ProductId IN (144,145,150,173) THEN 'InsuranceMentalCare'
+  WHEN consultations.Id > 0 AND medicalcategories.Id != 15 AND orderitems.ProductId IN (144,145,150,173) THEN 'InsuranceSpecialityCare'
+  WHEN orderitems.ProductId IN (151,152,174,175) THEN 'InsuranceInstant'
+END)`;
+
+// ─── WHERE clause builder ────────────────────────────────────────────────────
+
+function buildWhere(filters: FilterState): { where: string; params: unknown[] } {
   const conditions: string[] = [];
+  const params: unknown[] = [];
 
   if (filters.year) {
     conditions.push('YEAR(orderitems.Created) = ?');
     params.push(parseInt(filters.year));
   }
-
   if (filters.quarter) {
     conditions.push('QUARTER(orderitems.Created) = ?');
     params.push(parseInt(filters.quarter));
   }
-
   if (filters.month) {
     conditions.push('MONTH(orderitems.Created) = ?');
     params.push(parseInt(filters.month));
   }
-
   if (filters.day) {
     conditions.push('DAY(orderitems.Created) = ?');
     params.push(parseInt(filters.day));
   }
-
   if (filters.organization) {
     conditions.push('organizations.Name_en = ?');
     params.push(filters.organization);
   }
-
   if (filters.currency) {
     conditions.push('currencies.Code_en = ?');
     params.push(filters.currency);
   }
-
-  if (conditions.length > 0) {
-    whereClause = 'WHERE ' + conditions.join(' AND ');
+  if (filters.businessLine) {
+    conditions.push(`${BUSINESS_LINE} = ?`);
+    params.push(filters.businessLine);
   }
 
-  // Inject WHERE into query before GROUP BY
-  const query = BASE_QUERY.replace(
-    'GROUP BY orderitems.id',
-    `${whereClause}\nGROUP BY orderitems.id`
-  );
-
-  return { query, params };
+  return {
+    where: conditions.length ? 'WHERE ' + conditions.join(' AND ') : '',
+    params,
+  };
 }
+
+// ─── Period expression by granularity ───────────────────────────────────────
+
+function periodExpr(granularity: ChartGranularity): string {
+  switch (granularity) {
+    case 'daily':     return `DATE(orderitems.Created)`;
+    case 'quarterly': return `CONCAT(YEAR(orderitems.Created), '-Q', QUARTER(orderitems.Created))`;
+    case 'yearly':    return `CAST(YEAR(orderitems.Created) AS CHAR)`;
+    case 'monthly':
+    default:          return `DATE_FORMAT(orderitems.Created, '%Y-%m')`;
+  }
+}
+
+function periodLimit(granularity: ChartGranularity): number {
+  switch (granularity) {
+    case 'daily':     return 60;
+    case 'quarterly': return 12;
+    case 'yearly':    return 7;
+    case 'monthly':
+    default:          return 18;
+  }
+}
+
+// ─── Individual queries (all return only aggregated rows) ────────────────────
+
+async function fetchKPIs(dbConfig: DBConfig, where: string, params: unknown[]) {
+  const q = `
+    SELECT
+      COUNT(DISTINCT DATE(orderitems.Created)) AS uniqueDays,
+      COALESCE(SUM(${FINAL_PRICE}), 0)         AS totalSales,
+      COUNT(DISTINCT orderitems.id)            AS totalOrders
+    ${JOINS}
+    ${where}
+  `;
+  return executeQuery(dbConfig, q, params);
+}
+
+async function fetchChartData(
+  dbConfig: DBConfig,
+  where: string,
+  params: unknown[],
+  granularity: ChartGranularity
+) {
+  const period = periodExpr(granularity);
+  const limit  = periodLimit(granularity);
+  const q = `
+    SELECT
+      ${period}                                    AS period,
+      COUNT(DISTINCT orders.UserAuthId)            AS customers,
+      COUNT(DISTINCT orderitems.id)                AS orders_count,
+      COALESCE(SUM(${FINAL_PRICE}), 0)             AS sales
+    ${JOINS}
+    ${where}
+    GROUP BY period
+    ORDER BY period DESC
+    LIMIT ${limit}
+  `;
+  return executeQuery(dbConfig, q, params);
+}
+
+async function fetchBusinessLines(dbConfig: DBConfig, where: string, params: unknown[]) {
+  const q = `
+    SELECT
+      ${BUSINESS_LINE}                             AS businessLine,
+      COALESCE(SUM(${FINAL_PRICE}), 0)             AS sales,
+      COUNT(DISTINCT orderitems.id)                AS orders_count,
+      COUNT(DISTINCT orders.UserAuthId)            AS customers
+    ${JOINS}
+    ${where}
+    GROUP BY businessLine
+    ORDER BY sales DESC
+  `;
+  return executeQuery(dbConfig, q, params);
+}
+
+async function fetchFilterOptions(dbConfig: DBConfig, where: string, params: unknown[]) {
+  const q = `
+    SELECT DISTINCT
+      organizations.Name_en  AS org,
+      currencies.Code_en     AS currency,
+      ${BUSINESS_LINE}       AS businessLine
+    ${JOINS}
+    ${where}
+    LIMIT 500
+  `;
+  return executeQuery(dbConfig, q, params);
+}
+
+// ─── Route handler ───────────────────────────────────────────────────────────
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { dbConfig, filters = {} } = body as {
+    const {
+      dbConfig,
+      filters = {},
+      granularity = 'monthly',
+    } = body as {
       dbConfig: DBConfig;
       filters: FilterState;
+      granularity: ChartGranularity;
     };
 
-    if (!dbConfig || !dbConfig.host || !dbConfig.database) {
+    if (!dbConfig?.host || !dbConfig?.database) {
       return NextResponse.json(
         { error: 'Database configuration is required.' },
         { status: 400 }
       );
     }
 
-    const { query, params } = buildFilteredQuery(filters);
-    const result = await executeQuery(dbConfig, query, params);
-
-    if (result.error) {
-      return NextResponse.json({ error: result.error }, { status: 500 });
+    // ── Cache lookup ──────────────────────────────────────────────────────────
+    const cacheKey = makeCacheKey(dbConfig.host, dbConfig.database, filters, granularity);
+    const cached = getCached<object>(cacheKey);
+    if (cached) {
+      return NextResponse.json({ ...cached, cached: true });
     }
 
-    const rows = result.rows;
+    // ── Build shared WHERE clause ─────────────────────────────────────────────
+    const { where, params } = buildWhere(filters);
 
-    // Calculate KPIs
-    const totalSales = rows.reduce((sum, r) => sum + (parseFloat(String(r.FinalPrice)) || 0), 0);
-    const totalOrders = new Set(rows.map((r) => r.id)).size;
-    const dispenseAmount = rows.reduce((sum, r) => sum + (parseFloat(String(r.DispenseAmount)) || 0), 0);
+    // ── Run all queries in parallel ───────────────────────────────────────────
+    const [kpiRes, chartRes, blRes, filterRes] = await Promise.all([
+      fetchKPIs(dbConfig, where, params),
+      fetchChartData(dbConfig, where, params, granularity),
+      fetchBusinessLines(dbConfig, where, params),
+      fetchFilterOptions(dbConfig, where, params),
+    ]);
 
-    // Get unique days for daily averages
-    const uniqueDays = new Set(
-      rows.map((r) => {
-        const d = new Date(r.Created as string);
-        return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      })
-    ).size || 1;
+    // Surface the first error encountered
+    const firstError = kpiRes.error || chartRes.error || blRes.error;
+    if (firstError) {
+      return NextResponse.json({ error: firstError }, { status: 500 });
+    }
 
-    const dailyAveSales = totalSales / uniqueDays;
+    // ── KPIs ──────────────────────────────────────────────────────────────────
+    const kRow = kpiRes.rows[0] || {};
+    const totalSales    = parseFloat(String(kRow.totalSales))  || 0;
+    const totalOrders   = parseInt(String(kRow.totalOrders))   || 0;
+    const uniqueDays    = parseInt(String(kRow.uniqueDays))    || 1;
+    const dailyAveSales  = totalSales  / uniqueDays;
     const dailyAveOrders = totalOrders / uniqueDays;
 
-    // Build chart data by month
-    const chartMap: Record<string, { customers: Set<unknown>; orders: Set<unknown>; sales: number }> = {};
-    for (const row of rows) {
-      const d = new Date(row.Created as string);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      if (!chartMap[key]) {
-        chartMap[key] = { customers: new Set(), orders: new Set(), sales: 0 };
-      }
-      chartMap[key].customers.add(row.CustomerUserauthid);
-      chartMap[key].orders.add(row.id);
-      chartMap[key].sales += parseFloat(String(row.FinalPrice)) || 0;
-    }
-
-    const chartData = Object.entries(chartMap)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .slice(-12)
-      .map(([period, data]) => ({
-        period,
-        customers: data.customers.size,
-        orders: data.orders.size,
-        sales: Math.round(data.sales * 100) / 100,
+    // ── Chart data ────────────────────────────────────────────────────────────
+    // Reverse so oldest → newest on the chart x-axis
+    const chartData = chartRes.rows
+      .slice()
+      .reverse()
+      .map((r) => ({
+        period:    String(r.period),
+        customers: parseInt(String(r.customers))   || 0,
+        orders:    parseInt(String(r.orders_count)) || 0,
+        sales:     Math.round((parseFloat(String(r.sales)) || 0) * 100) / 100,
       }));
 
-    // Build business line table
-    const blMap: Record<string, { customers: Set<unknown>; orders: Set<unknown>; sales: number }> = {};
-    for (const row of rows) {
-      const bl = (row.BusinessLine as string) || 'Unknown';
-      if (!blMap[bl]) {
-        blMap[bl] = { customers: new Set(), orders: new Set(), sales: 0 };
-      }
-      blMap[bl].customers.add(row.CustomerUserauthid);
-      blMap[bl].orders.add(row.id);
-      blMap[bl].sales += parseFloat(String(row.FinalPrice)) || 0;
-    }
+    // ── Business line table ───────────────────────────────────────────────────
+    const tableData = blRes.rows
+      .filter((r) => r.businessLine)
+      .map((r) => ({
+        businessLine: String(r.businessLine),
+        sales:        Math.round((parseFloat(String(r.sales))  || 0) * 100) / 100,
+        orders:       parseInt(String(r.orders_count)) || 0,
+        customers:    parseInt(String(r.customers))    || 0,
+      }));
 
-    const tableData = Object.entries(blMap)
-      .map(([businessLine, data]) => ({
-        businessLine,
-        sales: Math.round(data.sales * 100) / 100,
-        orders: data.orders.size,
-        customers: data.customers.size,
-      }))
-      .sort((a, b) => b.sales - a.sales);
+    // ── Filter options ────────────────────────────────────────────────────────
+    const organizations  = [...new Set(filterRes.rows.map((r) => r.org).filter(Boolean))];
+    const currencies     = [...new Set(filterRes.rows.map((r) => r.currency).filter(Boolean))];
+    const businessLines  = [...new Set(filterRes.rows.map((r) => r.businessLine).filter(Boolean))];
 
-    // Get filter options
-    const organizations = [...new Set(rows.map((r) => r.organizations_Name_en).filter(Boolean))];
-    const currencies = [...new Set(rows.map((r) => r.currencies_Code_en).filter(Boolean))];
-    const businessLines = [...new Set(rows.map((r) => r.BusinessLine).filter(Boolean))];
-    const revenueSources = [...new Set(rows.map((r) => r.RevenueSource).filter(Boolean))];
-
-    return NextResponse.json({
+    // ── Build response & cache ────────────────────────────────────────────────
+    const payload = {
       kpis: {
-        dailyAveSales: Math.round(dailyAveSales * 100) / 100,
+        dailyAveSales:  Math.round(dailyAveSales  * 100) / 100,
         dailyAveOrders: Math.round(dailyAveOrders * 100) / 100,
-        dispenseAmount,
-        totalSales: Math.round(totalSales * 100) / 100,
+        totalSales:     Math.round(totalSales     * 100) / 100,
         totalOrders,
       },
       chartData,
       tableData,
-      filterOptions: {
-        organizations,
-        currencies,
-        businessLines,
-        revenueSources,
-      },
-    });
+      filterOptions: { organizations, currencies, businessLines },
+    };
+
+    setCached(cacheKey, payload, 5 * 60 * 1000); // 5-minute TTL
+
+    return NextResponse.json(payload);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Failed to fetch report data';
     return NextResponse.json({ error: message }, { status: 500 });

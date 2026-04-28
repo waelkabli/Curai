@@ -6,7 +6,6 @@ import {
   ShoppingCart,
   Users,
   DollarSign,
-  Package,
   RefreshCw,
   AlertCircle,
   WifiOff,
@@ -16,8 +15,9 @@ import KPICard from '@/components/dashboard/KPICard';
 import SalesChart from '@/components/dashboard/SalesChart';
 import BusinessLineTable from '@/components/dashboard/BusinessLineTable';
 import FilterPanel from '@/components/dashboard/FilterPanel';
-import { MainReportData, FilterState, KPIData, ChartDataPoint, BusinessLineRow } from '@/types';
+import { MainReportData, FilterState, KPIData, ChartDataPoint, BusinessLineRow, ChartGranularity } from '@/types';
 import { getSettings } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 const DEFAULT_FILTER_OPTIONS = {
   organizations: [],
@@ -26,15 +26,33 @@ const DEFAULT_FILTER_OPTIONS = {
   revenueSources: [],
 };
 
+const GRANULARITY_OPTIONS: { value: ChartGranularity; label: string }[] = [
+  { value: 'daily',     label: 'Daily'     },
+  { value: 'monthly',   label: 'Monthly'   },
+  { value: 'quarterly', label: 'Quarterly' },
+  { value: 'yearly',    label: 'Yearly'    },
+];
+
+const GRANULARITY_SUBTITLES: Record<ChartGranularity, string> = {
+  daily:     'Daily trend',
+  monthly:   'Monthly trend',
+  quarterly: 'Quarterly trend',
+  yearly:    'Yearly trend',
+};
+
 export default function DashboardPage() {
-  const [data, setData] = useState<MainReportData | null>(null);
+  const [data, setData]                   = useState<MainReportData | null>(null);
   const [filterOptions, setFilterOptions] = useState(DEFAULT_FILTER_OPTIONS);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filters, setFilters] = useState<FilterState>({});
+  const [loading, setLoading]             = useState(true);
+  const [error, setError]                 = useState<string | null>(null);
+  const [filters, setFilters]             = useState<FilterState>({});
+  const [granularity, setGranularity]     = useState<ChartGranularity>('monthly');
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-  const fetchData = useCallback(async (appliedFilters: FilterState) => {
+  const fetchData = useCallback(async (
+    appliedFilters: FilterState,
+    gran: ChartGranularity = 'monthly'
+  ) => {
     const settings = getSettings();
     const dbConfig = settings?.db;
 
@@ -51,10 +69,11 @@ export default function DashboardPage() {
       const response = await axios.post('/api/reports/main', {
         dbConfig,
         filters: appliedFilters,
+        granularity: gran,
       });
 
       setData({
-        kpis: response.data.kpis as KPIData,
+        kpis:      response.data.kpis      as KPIData,
         chartData: response.data.chartData as ChartDataPoint[],
         tableData: response.data.tableData as BusinessLineRow[],
       });
@@ -72,22 +91,23 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    fetchData({});
+    fetchData({}, granularity);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchData]);
 
-  const handleApplyFilters = () => {
-    fetchData(filters);
-  };
+  const handleApplyFilters = () => fetchData(filters, granularity);
+  const handleResetFilters = () => { setFilters({}); fetchData({}, granularity); };
 
-  const handleResetFilters = () => {
-    setFilters({});
-    fetchData({});
+  const handleGranularity = (g: ChartGranularity) => {
+    setGranularity(g);
+    fetchData(filters, g);
   };
 
   return (
     <div className="flex gap-0 h-full">
       {/* Main content */}
       <div className="flex-1 p-6 overflow-y-auto">
+
         {/* Header row */}
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -103,7 +123,7 @@ export default function DashboardPage() {
               </span>
             )}
             <button
-              onClick={() => fetchData(filters)}
+              onClick={() => fetchData(filters, granularity)}
               disabled={loading}
               className="flex items-center gap-2 px-4 py-2 bg-cura-blue text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 transition-colors shadow-sm"
             >
@@ -133,8 +153,8 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* KPI Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+        {/* KPI Cards — 4 cards, no Dispense Amount */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <KPICard
             title="Daily Ave. Sales"
             value={data?.kpis.dailyAveSales ?? 0}
@@ -151,14 +171,6 @@ export default function DashboardPage() {
             color="navy"
             loading={loading && !data}
             subtitle="Orders per day"
-          />
-          <KPICard
-            title="Dispense Amount"
-            value={data?.kpis.dispenseAmount ?? 0}
-            icon={<Package className="w-5 h-5" />}
-            color="teal"
-            loading={loading && !data}
-            subtitle="Prescription dispenses"
           />
           <KPICard
             title="Total Sales"
@@ -181,27 +193,58 @@ export default function DashboardPage() {
 
         {/* Chart */}
         <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-100 mb-6">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-start justify-between mb-4 gap-4 flex-wrap">
+
+            {/* Title + subtitle */}
             <div>
               <h3 className="font-semibold text-cura-navy">Customers, Orders and Sales</h3>
-              <p className="text-xs text-gray-500 mt-0.5">Monthly trend overview</p>
+              <p className="text-xs text-gray-500 mt-0.5">{GRANULARITY_SUBTITLES[granularity]}</p>
             </div>
-            <div className="flex items-center gap-4 text-xs text-gray-500">
-              <div className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-cura-light-blue" />
-                <span>Customers</span>
+
+            {/* Right side: legend + granularity pills */}
+            <div className="flex items-center gap-4 flex-wrap">
+              {/* Legend */}
+              <div className="flex items-center gap-3 text-xs text-gray-500">
+                <span className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full inline-block bg-[#42A5F5]" />
+                  Customers
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full inline-block bg-[#1565C0]" />
+                  Orders
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded-full inline-block bg-[#E85D4A]" />
+                  Sales
+                </span>
               </div>
-              <div className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-cura-blue" />
-                <span>Orders</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <div className="w-3 h-3 rounded-full bg-cura-coral" />
-                <span>Sales</span>
+
+              {/* Granularity pills */}
+              <div className="flex items-center gap-1 bg-gray-100 p-1 rounded-lg">
+                {GRANULARITY_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => handleGranularity(opt.value)}
+                    disabled={loading}
+                    className={cn(
+                      'px-3 py-1 rounded-md text-xs font-medium transition-all',
+                      granularity === opt.value
+                        ? 'bg-white text-cura-navy shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
               </div>
             </div>
           </div>
-          <SalesChart data={data?.chartData || []} loading={loading && !data} />
+
+          <SalesChart
+            data={data?.chartData || []}
+            loading={loading && !data}
+            granularity={granularity}
+          />
         </div>
 
         {/* Business Line Table */}

@@ -37,10 +37,11 @@ export interface AppSettings {
   display: DisplayConfig;
 }
 
+export type ChartGranularity = 'daily' | 'monthly' | 'quarterly' | 'yearly';
+
 export interface KPIData {
   dailyAveSales: number;
   dailyAveOrders: number;
-  dispenseAmount: number;
   totalSales: number;
   totalOrders: number;
 }
