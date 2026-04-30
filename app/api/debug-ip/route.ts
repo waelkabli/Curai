@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createConnection } from '@/lib/db';
+import { testConnection } from '@/lib/db';
 import { DBConfig } from '@/types';
 
 export const dynamic = 'force-dynamic';
@@ -25,15 +25,9 @@ export async function POST(req: NextRequest) {
   let dbStatus = 'not-attempted';
   let dbError = '';
   if (dbConfig?.host) {
-    try {
-      const conn = await createConnection(dbConfig);
-      await conn.ping();
-      await conn.end();
-      dbStatus = 'connected';
-    } catch (e) {
-      dbStatus = 'failed';
-      dbError = e instanceof Error ? e.message : String(e);
-    }
+    const result = await testConnection(dbConfig);
+    dbStatus = result.success ? 'connected' : 'failed';
+    dbError  = result.success ? '' : result.message;
   }
 
   return NextResponse.json({

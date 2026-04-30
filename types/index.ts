@@ -148,13 +148,9 @@ export interface ReportCard {
 }
 
 export interface FilterState {
-  year?: string;
-  quarter?: string;
-  month?: string;
-  day?: string;
+  dateFrom?: string;   // 'YYYY-MM-DD'
+  dateTo?: string;     // 'YYYY-MM-DD'
   businessLine?: string;
   organization?: string;
   currency?: string;
-  revenueSource?: string;
-  dispenseAmount?: string;
 }

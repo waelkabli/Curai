@@ -23,7 +23,23 @@ const DEFAULT_FILTER_OPTIONS = {
   organizations: [],
   currencies: [],
   businessLines: [],
-  revenueSources: [],
+};
+
+/** Returns 'YYYY-MM-DD' for the first day of the month N months ago */
+function monthsAgo(n: number): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - n);
+  d.setDate(1);
+  return d.toISOString().split('T')[0];
+}
+
+function todayStr(): string {
+  return new Date().toISOString().split('T')[0];
+}
+
+const DEFAULT_FILTERS: FilterState = {
+  dateFrom: monthsAgo(6),
+  dateTo:   todayStr(),
 };
 
 const GRANULARITY_OPTIONS: { value: ChartGranularity; label: string }[] = [
@@ -45,7 +61,7 @@ export default function DashboardPage() {
   const [filterOptions, setFilterOptions] = useState(DEFAULT_FILTER_OPTIONS);
   const [loading, setLoading]             = useState(true);
   const [error, setError]                 = useState<string | null>(null);
-  const [filters, setFilters]             = useState<FilterState>({});
+  const [filters, setFilters]             = useState<FilterState>(DEFAULT_FILTERS);
   const [granularity, setGranularity]     = useState<ChartGranularity>('monthly');
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
@@ -91,12 +107,12 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    fetchData({}, granularity);
+    fetchData(DEFAULT_FILTERS, granularity);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchData]);
 
   const handleApplyFilters = () => fetchData(filters, granularity);
-  const handleResetFilters = () => { setFilters({}); fetchData({}, granularity); };
+  const handleResetFilters = () => { setFilters(DEFAULT_FILTERS); fetchData(DEFAULT_FILTERS, granularity); };
 
   const handleGranularity = (g: ChartGranularity) => {
     setGranularity(g);
